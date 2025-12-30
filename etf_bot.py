@@ -4,14 +4,15 @@ import time
 import threading
 import io
 import matplotlib.pyplot as plt
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters, CallbackQuery
 
-TELEGRAM_TOKEN = "ВАШ_BOT_TOKEN"  # ⚠️ заміни на новий після створення
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+
+TELEGRAM_TOKEN = "ВАШ_BOT_TOKEN"  # <-- заміни на новий токен
 CHAT_ID = 409544912
 CHECK_INTERVAL = 600  # 10 хв
 
-# --- DB ---
+# --- Database ---
 conn = sqlite3.connect("etf_top.db", check_same_thread=False)
 c = conn.cursor()
 
@@ -20,13 +21,15 @@ c.execute("""CREATE TABLE IF NOT EXISTS subs(
     chat_id INTEGER,
     threshold REAL DEFAULT 5,
     rebound_enabled INTEGER DEFAULT 1,
+    last_alerted INTEGER DEFAULT 0,
+    rebound_sent INTEGER DEFAULT 0,
     PRIMARY KEY (ticker, chat_id)
 )""")
 conn.commit()
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# --- Data helpers ---
+# --- Helpers ---
 def get_price(ticker):
     df = yf.Ticker(ticker).history(period="1d")
     return float(df['Close'].iloc[-1]) if not df.empty else None
@@ -39,9 +42,7 @@ def get_ath_1y(ticker):
     df = yf.Ticker(ticker).history(period="365d")
     if df.empty:
         return None, None
-    ath = float(df['Close'].max())
-    ath_date = df['Close'].idxmax().strftime("%Y-%m-%d")
-    return ath, ath_date
+    return float(df['Close'].max()), df['Close'].idxmax().strftime("%Y-%m-%d")
 
 def build_chart_bytes(ticker, ath):
     df = yf.Ticker(ticker).history(period="365d")
@@ -63,13 +64,13 @@ def build_chart_bytes(ticker, ath):
 def calc_change_percent(now, ago):
     return (now - ago) / ago * 100 if ago else None
 
-# --- Monitor thread ---
-def monitor_prices():
+# --- Monitoring Loop ---
+def monitor_loop():
     while True:
-        c.execute("SELECT ticker, threshold, rebound_enabled FROM subs WHERE chat_id=?", (CHAT_ID,))
+        c.execute("SELECT ticker, threshold, rebound_enabled, last_alerted, rebound_sent FROM subs WHERE chat_id=?", (CHAT_ID,))
         items = c.fetchall()
 
-        for t, threshold, rebound_enabled in items:
+        for t, threshold, rebound_enabled, last_alerted, rebound_sent in items:
             price_now = get_price(t)
             price_ago = get_price_1y_ago(t)
             ath, ath_date = get_ath_1y(t)
@@ -78,200 +79,189 @@ def monitor_prices():
                 continue
 
             dd = (ath - price_now) / ath * 100
-            change_1y = calc_change_percent(price_now, price_ago)
-            yearly_str = f"Δ 1Y: {change_1y:.2f}%" if change_1y is not None else "Δ 1Y: N/A"
+            change = calc_change_percent(price_now, price_ago)
 
-            msg = (
-                f"{t}: {price_now:.2f} USD\n"
-                f"{yearly_str}\n"
-                f"Просадка від ATH 1Y: {dd:.2f}%\n"
-                f"ATH 1Y: {ath:.2f} ({ath_date})\n"
-                f"Поріг alert: {threshold}%\n"
-                f"Rebound: {'ON' if rebound_enabled==1 else 'OFF'}"
-            )
+            yearly = f"Δ 1Y: {change:.2f}%" if change is not None else "Δ 1Y: N/A"
+            msg = f"{t}: {price_now:.2f} USD\n{yearly}\nПросадка від ATH 1Y: {dd:.2f}%"
 
-            # Алерт падіння 1 раз за пробій порогу
-            if dd >= threshold:
+            # падіння
+            if dd >= threshold and last_alerted == 0:
                 chart = build_chart_bytes(t, ath)
                 if chart:
                     bot.send_photo(chat_id=CHAT_ID, photo=chart, caption="⚠️ Падіння!\n" + msg)
                 else:
                     bot.send_message(chat_id=CHAT_ID, text="⚠️ Падіння!\n" + msg)
 
-            # Rebound alert 1 раз, якщо увімкнено
-            if dd < threshold and rebound_enabled == 1:
-                bot.send_message(chat_id=CHAT_ID, text="📈 Відновлення!\n" + msg)
-                c.execute("UPDATE subs SET rebound_enabled=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
+                c.execute("UPDATE subs SET last_alerted=1, rebound_sent=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
                 conn.commit()
 
-            # Якщо знову пробило поріг — скидати rebound flag
-            if dd >= threshold and rebound_enabled == 0:
-                c.execute("UPDATE subs SET rebound_enabled=1 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
+            # rebound 1 раз
+            if dd < threshold and rebound_enabled == 1 and last_alerted == 1 and rebound_sent == 0:
+                bot.send_message(chat_id=CHAT_ID, text="📈 Відновлення!\n" + msg)
+                c.execute("UPDATE subs SET rebound_sent=1 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
+                conn.commit()
+
+            # reset rebound flag якщо знову пробив поріг
+            if dd >= threshold and rebound_sent == 1:
+                c.execute("UPDATE subs SET rebound_sent=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
                 conn.commit()
 
         time.sleep(CHECK_INTERVAL)
 
-# --- Menu UI ---
-async def show_main_menu(update: Update):
-    c.execute("SELECT ticker, threshold, rebound_enabled FROM subs WHERE chat_id=?", (CHAT_ID,))
-    items = c.fetchall()
-
-    rows = [
-        [InlineKeyboardButton(f"{t} | Alert@{th}% | Rebound: {'ON' if rb==1 else 'OFF'}", callback_data="none")]
-        for t, th, rb in items
+# --- Reply menu ---
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [KeyboardButton("➕ Add ETF"), KeyboardButton("📌 My ETFs")],
+        [KeyboardButton("📉 Set Threshold"), KeyboardButton("📈 Toggle Rebound")],
+        [KeyboardButton("🔁 Force Check All"), KeyboardButton("📊 Status")],
+        [KeyboardButton("❓ Help")]
     ]
+    menu = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("Вітаю! Використовуйте меню 👇", reply_markup=menu)
 
-    keyboard = rows + [
-        [InlineKeyboardButton("➕ Add ETF", callback_data="add")],
-        [InlineKeyboardButton("🗑 Remove ETF", callback_data="remove")],
-        [InlineKeyboardButton("📉 Set Threshold", callback_data="threshold")],
-        [InlineKeyboardButton("📈 Toggle Rebound", callback_data="rebound_menu")],
-        [InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")]
-    ]
+async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "📌 *Список команд:*\n\n"
+        "/start — меню\n"
+        "/list — підписки ETF\n"
+        "/status — стан ETF\n"
+        "/commands — команди\n"
+        "/help — допомога\n"
+        "Також усі дії є в кнопках меню."
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "🤖 *ETF Monitor Bot — опис опцій:*\n\n"
+        "➕ *Add ETF* — додати ETF у моніторинг.\n"
+        "📌 *My ETFs* — переглянути список підписок.\n"
+        "📉 *Set Threshold* — встановити поріг просадки від ATH 1Y кнопками 1/3/5/7/10%.\n"
+        "📈 *Toggle Rebound* — увімкнути/вимкнути алерти відновлення для кожного ETF окремо.\n"
+        "🔁 *Force Check All* — перевірити всі ETF негайно.\n"
+        "📊 *Status* — ціна зараз, % зміна vs 365 днів тому, дата ATH 1Y, DD від ATH.\n"
+    )
     if update.message:
-        await update.message.reply_text("ETF Monitor Bot 🚀", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(msg, parse_mode="Markdown")
     else:
-        await update.callback_query.message.reply_text("Меню:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
 
-async def add_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.message.reply_text("Введіть тікер ETF для додавання:")
-    context.user_data['action'] = "add_input"
-
-async def threshold_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.message.reply_text("Оберіть ETF:", reply_markup=await make_etf_buttons("threshold_select"))
-    context.user_data['action'] = "threshold_select"
-
-async def rebound_menu_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.message.reply_text("Оберіть ETF для Rebound ON/OFF:", reply_markup=await make_etf_buttons("toggle_rebound"))
-    context.user_data['action'] = "toggle_rebound"
-
-async def remove_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.message.reply_text("Оберіть ETF для видалення:", reply_markup=await make_etf_buttons("remove_select"))
-
-async def status_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    c.execute("SELECT ticker, threshold, rebound_enabled FROM subs WHERE chat_id=?", (CHAT_ID,))
+async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c.execute("SELECT ticker, threshold FROM subs WHERE chat_id=?", (CHAT_ID,))
     items = c.fetchall()
+    lines = [f"{t} (поріг {th}%)" for t, th in items]
+    await update.message.reply_text("📌 Підписки:\n" + ("\n".join(lines) if lines else "немає"))
 
-    lines=[]
-    charts=[]
-    for t, th, rb in items:
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c.execute("SELECT ticker FROM subs WHERE chat_id=?", (CHAT_ID,))
+    items = [r[0] for r in c.fetchall()]
+
+    lines = []
+    for t in items:
         price_now = get_price(t)
         price_ago = get_price_1y_ago(t)
         ath, ath_date = get_ath_1y(t)
+
         if price_now and ath:
             dd = (ath - price_now) / ath * 100
             change = calc_change_percent(price_now, price_ago)
-            change_str = f"Δ 1Y: {change:.2f}%" if change is not None else "Δ 1Y: N/A"
-            lines.append(f"{t}: {price_now:.2f} USD | {change_str} | DD {dd:.2f}% | Rebound {'ON' if rb else 'OFF'} | Alert@{th}%")
-            chart = build_chart_bytes(t, ath)
-            if chart:
-                charts.append(chart)
+            yearly = f"Δ 1Y: {change:.2f}%" if change else "Δ 1Y: N/A"
+            lines.append(f"{t}: {price_now:.2f} USD | {yearly} | DD {dd:.2f}% | ATH 1Y ({ath_date})")
 
-    msg="📊 Статус ETF:\n" + ("\n".join(lines) if lines else "немає даних")
+    msg = "📊 *Status:*\n\n" + ("\n".join(lines) if lines else "немає даних")
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-    for chart in charts:
-        bot.send_photo(chat_id=CHAT_ID, photo=chart)
-    await q.message.reply_text(msg)
+async def threshold_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tickers = (await make_reply_list(update, "threshold_pick"))
+    if not tickers:
+        return
 
-async def help_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    msg = (
-        "🤖 *ETF Monitor Bot — опис меню:*\n\n"
-        "➕ *Add ETF* — додати новий ETF у моніторинг і підписку.\n"
-        "📌 *My ETFs* — переглянути ваш список ETF.\n"
-        "📉 *Set Threshold* — вибрати ETF і встановити поріг просадки кнопками (1/3/5/7/10%).\n"
-        "📈 *Toggle Rebound* — увімкнути або вимкнути сповіщення про відновлення для обраного ETF.\n"
-        "📊 *Status* — подивитись: ціну зараз, % зміну vs 365 днів тому, просадку від ATH 1Y, дату ATH, поріг та rebound стан.\n"
-        "🔁 *Force Check Now* — перевірити *всі* ETF негайно.\n"
-        "❓ *Help* — показати опис меню і команд."
-    )
-    await q.message.reply_text(msg, parse_mode="Markdown")
+async def toggle_rebound_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tickers = (await make_reply_list(update, "toggle_rebound"))
+    if not tickers:
+        return
 
-# Builders for ticker lists
-async def make_etf_buttons(prefix):
+async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tickers = (await make_reply_list(update, "remove_select"))
+    if not tickers:
+        return
+
+async def force_check_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await status_cmd(update, context)
+
+# Будуємо кнопковий список ETF для вибору
+async def make_reply_list(update, prefix):
     c.execute("SELECT ticker FROM subs WHERE chat_id=?", (CHAT_ID,))
     items = [r[0] for r in c.fetchall()]
     if not items:
-        return InlineKeyboardMarkup([[InlineKeyboardButton("немає ETF", callback_data="none")]])
+        await update.message.reply_text("Немає ETF у підписках")
+        return None
+    buttons = [[InlineKeyboardButton(t, callback_data=f"{prefix}:{t}")] for t in items]
+    await update.message.reply_text("Оберіть ETF:", reply_markup=InlineKeyboardMarkup(buttons))
+    return items
 
-    keyboard = [[InlineKeyboardButton(t, callback_data=f"{prefix}:{t}")] for t in items]
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
-    return InlineKeyboardMarkup(keyboard)
-
-async def etf_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Кнопки 1/3/5/7/10% для threshold
+async def threshold_pick_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    prefix, ticker = q.data.split(":")
+    _, ticker = q.data.split(":")
     ticker = ticker.upper()
 
-    if prefix == "remove_select":
-        c.execute("DELETE FROM subs WHERE ticker=? AND chat_id=?", (ticker, CHAT_ID))
-        conn.commit()
-        await q.message.reply_text(f"🗑 Видалено {ticker}")
-        return await show_main_menu(update)
+    buttons = [
+        [InlineKeyboardButton("1%", callback_data=f"threshold_set:{ticker}:1")],
+        [InlineKeyboardButton("3%", callback_data=f"threshold_set:{ticker}:3")],
+        [InlineKeyboardButton("5%", callback_data=f"threshold_set:{ticker}:5")],
+        [InlineKeyboardButton("7%", callback_data=f"threshold_set:{ticker}:7")],
+        [InlineKeyboardButton("10%", callback_data=f"threshold_set:{ticker}:10")],
+    ]
+    await q.message.reply_text("Встановіть поріг просадки:", reply_markup=InlineKeyboardMarkup(buttons))
 
-    if prefix == "threshold_select":
-        context.user_data['ticker'] = ticker
-        context.user_data['action'] = "threshold_pick"
-        buttons = [[InlineKeyboardButton(x, callback_data=f"threshold_set:{ticker}:{x.strip('%')}")] for x in ["1%","3%","5%","7%","10%"]]
-        await q.message.reply_text("Встановіть поріг просадки:", reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    if prefix == "toggle_rebound":
-        c.execute("SELECT rebound_enabled FROM subs WHERE ticker=? AND chat_id=?", (ticker, CHAT_ID))
-        row = c.fetchone()
-        if row:
-            new_state = 0 if row[0] == 1 else 1
-            c.execute("UPDATE subs SET rebound_enabled=? WHERE ticker=? AND chat_id=?", (new_state, ticker, CHAT_ID))
-            conn.commit()
-            await q.message.reply_text(f"🔁 Rebound для {ticker}: {'ON' if new_state else 'OFF'}")
-        return await show_main_menu(update)
-
+# threshold set
 async def threshold_set_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    _, ticker, val = q.data.split(":")
+    _, ticker, val = q.data.replace("threshold_set:", "").split(":")
     val = float(val)
-    c.execute("UPDATE subs SET threshold=?, rebound_enabled=1 WHERE ticker=? AND chat_id=?", (val, ticker, CHAT_ID))
+    c.execute("UPDATE subs SET threshold=? WHERE ticker=? AND chat_id=?", (val, ticker, CHAT_ID))
     conn.commit()
-    await q.message.reply_text(f"🔧 Новий поріг для {ticker} = {val}%")
-    await show_main_menu(update)
+    await q.message.reply_text(f"Поріг для {ticker} = {val}%")
 
-# Text router for Add
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get('action') == "add_input":
-        ticker = update.message.text.strip().upper()
-        c.execute("INSERT OR IGNORE INTO subs(ticker, chat_id, threshold, rebound_enabled) VALUES(?,?,5,1)", (ticker, CHAT_ID))
+# rebound toggle
+async def toggle_rebound_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, ticker = q.data.split(":")
+    ticker = ticker.upper()
+    c.execute("SELECT rebound_enabled FROM subs WHERE ticker=? AND chat_id=?", (ticker, CHAT_ID))
+    row = c.fetchone()
+    if row:
+        new_state = 0 if row[0] == 1 else 1
+        c.execute("UPDATE subs SET rebound_enabled=? WHERE ticker=? AND chat_id=?", (new_state, ticker, CHAT_ID))
         conn.commit()
-        await update.message.reply_text(f"✅ Додано {ticker}")
-        context.user_data['action'] = None
-        await show_main_menu(update)
+        await q.message.reply_text(f"Rebound для {ticker}: {'ON' if new_state else 'OFF'}")
 
-# Register app handlers
+# Add ETF через текст
+async def add_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ticker = update.message.text.strip().upper()
+    c.execute("INSERT OR IGNORE INTO subs(ticker, chat_id, threshold, rebound_enabled) VALUES(?,?,5,1)", (ticker, CHAT_ID))
+    conn.commit()
+    await update.message.reply_text(f"Додано {ticker}")
+
+# --- Register App ---
 app = Application.builder().token(TELEGRAM_TOKEN).build()
+
 app.add_handler(CommandHandler("start", start_cmd))
-app.add_handler(CallbackQueryHandler(add_btn, pattern="^add$"))
-app.add_handler(CallbackQueryHandler(remove_btn, pattern="^remove$"))
-app.add_handler(CallbackQueryHandler(threshold_btn, pattern="^threshold$"))
-app.add_handler(CallbackQueryHandler(rebound_menu_btn, pattern="^rebound_menu$"))
-app.add_handler(CallbackQueryHandler(status_btn, pattern="^status$"))
-app.add_handler(CallbackQueryHandler(help_btn, pattern="^help$"))
-app.add_handler(CallbackQueryHandler(threshold_select, pattern="^threshold_select:.*"))
-app.add_handler(CallbackQueryHandler(toggle_select, pattern="^toggle_select:.*"))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+app.add_handler(CommandHandler("list", list_cmd))
+app.add_handler(CommandHandler("status", status_cmd))
+app.add_handler(CommandHandler("commands", commands_cmd))
+app.add_handler(CommandHandler("help", help_cmd))
+
+app.add_handler(CallbackQueryHandler(threshold_pick_handler, pattern="^threshold_pick:"))
+app.add_handler(CallbackQueryHandler(toggle_rebound_handler, pattern="^toggle_rebound:"))
+app.add_handler(CallbackQueryHandler(remove_cmd, pattern="^remove_select:"))
+app.add_handler(CallbackQueryHandler(force_check_all, pattern="^force_check_all$"))
+
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_text_handler))
 
 threading.Thread(target=monitor_loop, daemon=True).start()
 print("Bot running…")
