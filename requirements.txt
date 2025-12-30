@@ -1,0 +1,4 @@
+yfinance
+python-telegram-bot
+matplotlib
+sqlite-utils
