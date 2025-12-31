@@ -4,172 +4,199 @@ import time
 import threading
 import io
 import matplotlib.pyplot as plt
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+TOKEN = "ВАШ_BOT_TOKEN"  # <-- заміни на валідний токен
+DB = "etf_top.db"
+INTERVAL = 600  # 10 хв
 
-TELEGRAM_TOKEN = "8404794616:AAGNkrwRfVO9Nib0UxzvuYTJ2MElpItrkcQ"  # <-- заміни на новий токен
-CHAT_ID = 409544912
-CHECK_INTERVAL = 600  # 10 хв
-
-# --- Database ---
-conn = sqlite3.connect("etf_top.db", check_same_thread=False)
+# --- DB ---
+conn = sqlite3.connect(DB, check_same_thread=False)
 c = conn.cursor()
-
-c.execute("""CREATE TABLE IF NOT EXISTS subs(
+c.execute("""
+CREATE TABLE IF NOT EXISTS subs(
     ticker TEXT,
     chat_id INTEGER,
     threshold REAL DEFAULT 5,
-    rebound_enabled INTEGER DEFAULT 1,
-    last_alerted INTEGER DEFAULT 0,
+    rebound INTEGER DEFAULT 1,
+    last_alert INTEGER DEFAULT 0,
     rebound_sent INTEGER DEFAULT 0,
-    price_ago REAL DEFAULT 0,
+    top REAL DEFAULT 0,
+    top_date TEXT DEFAULT '',
     PRIMARY KEY (ticker, chat_id)
-)""")
+)
+""")
 conn.commit()
 
-bot = Bot(token=TELEGRAM_TOKEN)
+# --- Market ---
+def fetch_top(t):
+    df = yf.Ticker(t).history("365d")
+    if df.empty: return None, None
+    return float(df.Close.max()), df.Close.idxmax().strftime("%Y-%m-%d")
 
-# --- Helpers ---
-def get_price(ticker):
-    df = yf.Ticker(ticker).history(period="1d")
-    return float(df['Close'].iloc[-1]) if not df.empty else None
+def fetch_price(t):
+    df = yf.Ticker(t).history("1d")
+    return float(df.Close.iloc[-1]) if not df.empty else None
 
-def get_price_1y_ago(ticker):
-    df = yf.Ticker(ticker).history(period="365d")
-    return float(df['Close'].iloc[0]) if not df.empty else None
+def fetch_ago(t):
+    df = yf.Ticker(t).history("365d")
+    return float(df.Close.iloc[0]) if not df.empty else None
 
-def get_ath_1y(ticker):
-    df = yf.Ticker(ticker).history(period="365d")
-    if df.empty:
-        return None, None
-    return float(df['Close'].max()), df['Close'].idxmax().strftime("%Y-%m-%d")
-
-def build_chart_bytes(ticker, ath):
-    df = yf.Ticker(ticker).history(period="365d")
-    hist = df['Close']
-    if hist.empty:
-        return None
+def make_chart(t, top):
+    df = yf.Ticker(t).history("365d")
+    hist = df.Close
+    if hist.empty: return None
     plt.figure()
     plt.plot(hist)
-    plt.axhline(ath)
-    plt.title(f"{ticker} | ATH 1Y: {ath:.2f}")
-    plt.xlabel("Date")
-    plt.ylabel("Price")
+    plt.axhline(top)
+    plt.title(f"{t} | TOP 365: {top:.2f}")
     buf = io.BytesIO()
     plt.savefig(buf, format="png")
     plt.close()
     buf.seek(0)
     return buf
 
-def calc_change_percent(now, ago):
-    return (now - ago) / ago * 100 if ago else None
-
-# --- Monitoring Loop ---
-def monitor_loop():
+# --- Monitor ---
+def monitor():
+    bot_app = Application.builder().token(TOKEN).build().bot
     while True:
-        c.execute("SELECT ticker, threshold, rebound_enabled, last_alerted, rebound_sent FROM subs WHERE chat_id=?", (CHAT_ID,))
-        items = c.fetchall()
-
-        for t, threshold, rebound_enabled, last_alerted, rebound_sent in items:
-            price_now = get_price(t)
-            price_ago = get_price_1y_ago(t)
-            ath, ath_date = get_ath_1y(t)
-
-            if price_now is None or ath is None:
-                continue
-
-            dd = (ath - price_now) / ath * 100
-            change = calc_change_percent(price_now, price_ago)
-            yearly = f"Δ 1Y: {change:.2f}%" if change is not None else "Δ 1Y: N/A"
-
-            msg = f"{t}: {price_now:.2f} USD\n{yearly}\nПросадка від ATH 1Y: {dd:.2f}% | ATH({ath_date})"
-
-            if dd >= threshold and last_alerted == 0:
-                chart = build_chart_bytes(t, ath)
-                if chart:
-                    bot.send_photo(chat_id=CHAT_ID, photo=chart, caption="⚠️ Падіння!\n" + msg)
+        rows = c.execute("SELECT ticker, threshold, rebound, last_alert, rebound_sent, top, top_date FROM subs WHERE chat_id=?", (CHAT_ID,)).fetchall()
+        for t, th, rb, last, rbs, top, top_date in rows:
+            now = fetch_price(t)
+            ago = fetch_ago(t)
+            if now is None or top == 0:
+                new_top, new_date = fetch_top(t)
+                if new_top:
+                    c.execute("UPDATE subs SET top=?, top_date=?, rebound_sent=0 WHERE ticker=? AND chat_id=?", (new_top, new_date, t, CHAT_ID))
+                    conn.commit()
+                    top, top_date = new_top, new_date
                 else:
-                    bot.send_message(chat_id=CHAT_ID, text="⚠️ Падіння!\n" + msg)
-                c.execute("UPDATE subs SET last_alerted=1, rebound_sent=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
+                    continue
+
+            dd = (top - now) / top * 100
+            chg = ((now - ago) / ago * 100) if ago else None
+            chg_str = f"{chg:.2f}%" if chg is not None else "N/A"
+
+            text = (
+                f"{t.upper()}\n"
+                f"Ціна зараз: {now:.2f} USD\n"
+                f"Зміна за 365 днів: {chg_str}\n"
+                f"Просадка від TOP 365: {dd:.2f}%\n"
+                f"TOP 365: {top:.2f} USD ({top_date})\n"
+                f"Поріг alert: {th}% | Rebound: {'ON' if rb else 'OFF'}"
+            )
+
+            if dd >= th and last == 0:
+                chart = make_chart(t, top)
+                if chart:
+                    bot_app.send_photo(chat_id=CHAT_ID, photo=chart, caption="⚠️ Падіння!\n" + text)
+                else:
+                    bot_app.send_message(chat_id=CHAT_ID, text="⚠️ Падіння!\n" + text)
+                c.execute("UPDATE subs SET last_alert=1, rebound_sent=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
                 conn.commit()
 
-            if dd < threshold and rebound_enabled == 1 and last_alerted == 1 and rebound_sent == 0:
-                bot.send_message(chat_id=CHAT_ID, text="📈 Відновлення!\n" + msg)
+            if dd < th and rb == 1 and last == 1 and rbs == 0:
+                bot_app.send_message(chat_id=CHAT_ID, text="📈 Відновлення!\n" + text)
                 c.execute("UPDATE subs SET rebound_sent=1 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
                 conn.commit()
 
-            if dd >= threshold and rebound_sent == 1:
-                c.execute("UPDATE subs SET rebound_sent=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
+            if dd < th and last == 1:
+                c.execute("UPDATE subs SET last_alert=0 WHERE ticker=? AND chat_id=?", (t, CHAT_ID))
                 conn.commit()
 
-        time.sleep(CHECK_INTERVAL)
+        time.sleep(INTERVAL)
 
-# --- Commands ---
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    menu = ReplyKeyboardMarkup([
-        ["➕ Add ETF", "📌 My ETFs"],
-        ["📉 Set Threshold", "📈 Toggle Rebound"],
-        ["🔁 Force Check All", "📊 Status"],
-        ["❓ Help"]
-    ], resize_keyboard=True)
-    await update.message.reply_text("Вітаю! Використовуйте меню 👇", reply_markup=menu)
+# --- Handlers ---
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привіт! Введи /help щоб побачити команди.")
 
-async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📌 Доступні команди:\n"
-        "/start — меню\n"
-        "/list — ваші ETF\n"
-        "/status — стан ETF\n"
-        "/commands — список команд\n"
+async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "📌 *Команди бота:*\n\n"
+        "/add <ticker> — додати ETF у моніторинг\n"
+        "/list — список ваших ETF\n"
+        "/status — перевірка всіх ETF зараз + графіки\n"
+        "/rebound <ticker> — ON/OFF алерти відновлення\n"
+        "/threshold <ticker> — встановити поріг просадки (кнопками)\n"
+        "/commands — показати всі команди\n"
         "/help — допомога"
     )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    c.execute("SELECT ticker, threshold FROM subs WHERE chat_id=?", (CHAT_ID,))
-    items = c.fetchall()
-    await update.message.reply_text("📌 Ваші ETF:\n" + ("\n".join([f"{t} (поріг {th}%)" for t, th in items]) if items else "немає"))
+async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rows = c.execute("SELECT ticker, threshold, rebound FROM subs WHERE chat_id=?", (CHAT_ID,)).fetchall()
+    if not rows:
+        return await update.message.reply_text("📭 Немає підписок")
+    lines = [f"{t.upper()} → поріг {th}% | Rebound: {'ON' if rb else 'OFF'}" for t, th, rb in rows]
+    await update.message.reply_text("📌 *Ваші ETF:*\n\n" + "\n".join(lines), parse_mode="Markdown")
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    c.execute("SELECT ticker FROM subs WHERE chat_id=?", (CHAT_ID,))
-    items=[r[0] for r in c.fetchall()]
-    lines=[]
-    charts=[]
-    for t in items:
-        price_now=get_price(t)
-        ath,ath_date=get_ath_1y(t)
-        price_ago=get_price_1y_ago(t)
-        if price_now and ath:
-            dd=(ath-price_now)/ath*100
-            change=calc_change_percent(price_now,price_ago)
-            yearly=f"Δ 1Y: {change:.2f}%" if change else "Δ 1Y: N/A"
-            lines.append(f"{t}: {price_now:.2f} USD | {yearly} | DD {dd:.2f}% | ATH({ath_date})")
-            ch=build_chart_bytes(t,ath)
-            if ch: charts.append(ch)
-    for ch in charts:
-        bot.send_photo(chat_id=CHAT_ID,photo=ch)
-    await update.message.reply_text("📊 Status:\n\n"+("\n".join(lines) if lines else "немає даних"))
+async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    rows = c.execute("SELECT ticker, top FROM subs WHERE chat_id=?", (CHAT_ID,)).fetchall()
+    if not rows:
+        return await update.message.reply_text("📭 Немає даних")
+    for t, top in rows:
+        chart = make_chart(t, top)
+        if chart:
+            await ctx.bot.send_photo(chat_id=CHAT_ID, photo=chart, caption=f"{t.upper()} графік")
+    await update.message.reply_text("🔁 Статус надіслано")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Опис опцій у меню:\nAdd ETF | My ETFs | Set Threshold | Toggle Rebound | Force Check All | Status | Help")
+async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    t = ctx.args[0].upper() if ctx.args else None
+    if not t:
+        return await update.message.reply_text("❗ Вкажи тікер. Приклад: /add SPY")
+    top, d = fetch_top(t)
+    if top:
+        c.execute("INSERT OR IGNORE INTO subs(ticker, chat_id, threshold, rebound, top, top_date) VALUES(?,?,?,?,?,?)", (t, CHAT_ID, 5, 1, top, d))
+        conn.commit()
+        await update.message.reply_text(f"✅ Додано {t}")
+    else:
+        await update.message.reply_text("❗ Не вдалося отримати дані для тікера")
 
-# --- Routers ---
-async def reply_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text=update.message.text
-    if text=="📌 My ETFs" or text=="➕ Add ETF" or text=="📉 Set Threshold" or text=="📈 Toggle Rebound" or text=="🔁 Force Check All":
-        return await update.message.reply_text("Оберіть команду через /start або /commands.")
-    return await update.message.reply_text("Невідома команда. /help")
+async def threshold_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    t = ctx.args[0].upper() if ctx.args else None
+    if not t:
+        return await update.message.reply_text("❗ Вкажи тікер. Приклад: /threshold QQQ")
+    row = c.execute("SELECT ticker FROM subs WHERE ticker=? AND chat_id=?", (t, CHAT_ID)).fetchone()
+    if not row:
+        return await update.message.reply_text("❗ Такого ETF немає. Додай через /add")
+    buttons = [[InlineKeyboardButton(x, callback_data=f"threshold_set:{t}:{x.strip('%')}")] for x in ["1%","3%","5%","7%","10%"]]
+    await update.message.reply_text("Встановіть поріг просадки:", reply_markup=InlineKeyboardMarkup(buttons))
 
-# --- App run ---
-app = Application.builder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler("start", start_cmd))
+async def threshold_set_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, t, val = q.data.split(":")
+    val = float(val)
+    c.execute("UPDATE subs SET threshold=?, rebound=1, rebound_sent=0 WHERE ticker=? AND chat_id=?", (val, t, CHAT_ID))
+    conn.commit()
+    await q.message.reply_text(f"🔧 Поріг для {t} = {val}%")
+
+async def rebound_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    t = ctx.args[0].upper() if ctx.args else None
+    if not t:
+        return await update.message.reply_text("❗ Вкажи тікер. Приклад: /rebound TLT")
+    row = c.execute("SELECT rebound FROM subs WHERE ticker=? AND chat_id=?", (t, CHAT_ID)).fetchone()
+    if row:
+        new = 0 if row[0] == 1 else 1
+        c.execute("UPDATE subs SET rebound=?, rebound_sent=0 WHERE ticker=? AND chat_id=?", (new, t, CHAT_ID))
+        conn.commit()
+        await update.message.reply_text(f"🔁 Rebound для {t}: {'ON' if new else 'OFF'}")
+    else:
+        await update.message.reply_text("❗ Такого ETF немає")
+
+# --- Run ---
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help_cmd))
 app.add_handler(CommandHandler("list", list_cmd))
 app.add_handler(CommandHandler("status", status_cmd))
-app.add_handler(CommandHandler("commands", commands_cmd))
-app.add_handler(CommandHandler("help", help_cmd))
+app.add_handler(CommandHandler("add", add_cmd))
+app.add_handler(CommandHandler("threshold", threshold_cmd))
+app.add_handler(CommandHandler("rebound", rebound_toggle))
+app.add_handler(CallbackQueryHandler(threshold_set_handler))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_router))
 
-threading.Thread(target=monitor_loop, daemon=True).start()
+threading.Thread(target=monitor, daemon=True).start()
 print("Bot running…")
 app.run_polling()
-
