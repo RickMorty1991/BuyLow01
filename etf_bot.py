@@ -20,7 +20,7 @@ from telegram.ext import (
 )
 
 # ================== CONFIG ==================
-TELEGRAM_TOKEN = "8404794616:AAHiLBLeHrDOZbi7D3maK58AkQpheDLkUQ8"
+TELEGRAM_TOKEN = "8404794616:AAF6pDwneDscRXbZN8fnepV3z-ekFLAo-j0"
 CHECK_INTERVAL = 900  # 15 min
 DB_PATH = "etf.db"
 
