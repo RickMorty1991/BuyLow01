@@ -9,7 +9,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 # ==== CONFIG ====
 TOKEN = "8404794616:AAHUJeJp_wvOa8poUXcZufJRXXC72pZZgU0"
-CHAT_ID = "409544912"
 CHECK_INTERVAL = 600  # 10 хв (інтервал перевірки)
 
 # ==== DATABASE ====
@@ -32,7 +31,7 @@ db.commit()
 bot = Bot(TOKEN)
 sql_lock = threading.Lock()
 
-# ==== FINANCE HELPERS ====
+# ==== HELPERS ====
 def get_price_now(ticker: str):
     try:
         df = yf.Ticker(ticker).history(period="1d", timeout=10)
@@ -85,29 +84,12 @@ def build_chart_bytes(ticker: str, ath: float):
     except Exception:
         return None
 
-# ==== DEFAULT SUBS INIT ====
-def init_defaults(chat_id: int):
-    with sql_lock:
-        rows = c.execute("SELECT ticker FROM subs WHERE chat_id=?", (chat_id,)).fetchall()
-        if rows:
-            return  # вже є підписки
-        for t, th in [("SPY", 4.0), ("QQQ", 7.0)]:
-            now = get_price_now(t)
-            if now is None:
-                continue
-            ago = get_price_365d_ago(t) or now
-            c.execute(
-                "INSERT OR IGNORE INTO subs(ticker,chat_id,threshold,rebound_enabled,last_alerted,rebound_sent,price_365d_ago) VALUES(?,?,?,?,?,?,?)",
-                (t, chat_id, th, 1, 0, 0, ago)
-            )
-    db.commit()
-
-# ==== STATUS BUILDER ====
 def build_status_text(ticker: str, chat_id: int):
     now = get_price_now(ticker)
     ath, ath_date = get_ath_52w(ticker)
     with sql_lock:
         row = c.execute("SELECT price_365d_ago, threshold, rebound_enabled FROM subs WHERE ticker=? AND chat_id=?", (ticker, chat_id)).fetchone()
+
     ago_price = float(row[0]) if row and row[0] else None
 
     if now is None or ath is None:
@@ -128,12 +110,11 @@ def build_status_text(ticker: str, chat_id: int):
 
     return msg, ath
 
-# ==== MONITOR THREAD ====
-def monitor_loop():
+# ==== MONITORING THREAD ====
+def monitor_loop_runner():
     while True:
-        rows = []
         with sql_lock:
-            rows = c.execute("SELECT ticker,threshold,rebound_enabled,last_alerted,rebound_sent,price_365d_ago,chat_id FROM subs").fetchall()
+            rows = c.execute("SELECT ticker, threshold, rebound_enabled, last_alerted, rebound_sent, price_365d_ago, chat_id FROM subs").fetchall()
 
         for ticker, threshold, rebound_enabled, last_alerted, rebound_sent, price_ago, chat_id in rows:
             try:
@@ -155,7 +136,6 @@ def monitor_loop():
                     arrow = "📈" if yc > 0 else "📉"
                     msg += f"\n{arrow} Δ365: `{yc:.2f}%`"
 
-                # Alert просадки
                 if dd >= threshold and last_alerted == 0:
                     chart = build_chart_bytes(ticker, ath)
                     if chart:
@@ -166,29 +146,29 @@ def monitor_loop():
                         c.execute("UPDATE subs SET last_alerted=1, rebound_sent=0 WHERE ticker=? AND chat_id=?", (ticker, chat_id))
                     db.commit()
 
-                # Alert відскоку
                 if dd < threshold and rebound_enabled == 1 and last_alerted == 1 and rebound_sent == 0:
                     bot.send_message(chat_id, "📈 *Rebound після просадки!*\n\n" + msg, parse_mode="Markdown")
                     with sql_lock:
                         c.execute("UPDATE subs SET rebound_sent=1 WHERE ticker=? AND chat_id=?", (ticker, chat_id))
                     db.commit()
 
-                # Reset rebound якщо впало знову
                 if dd >= threshold and rebound_sent == 1:
                     with sql_lock:
                         c.execute("UPDATE subs SET rebound_sent=0 WHERE ticker=? AND chat_id=?", (ticker, chat_id))
                     db.commit()
 
             except Exception as e:
-                print(f"[Thread ETF Error] {ticker}: {e}")
-                continue
+                print(f"[ETF Monitor Error] {ticker}: {e}")
 
         time.sleep(CHECK_INTERVAL)
 
-# ==== COMMAND HANDLERS ====
+# ==== COMMANDS ====
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    init_defaults(chat_id)
+    with sql_lock:
+        init = c.execute("SELECT ticker FROM subs WHERE chat_id=?", (chat_id,)).fetchall()
+    if not init:
+        init_defaults(chat_id)
 
     menu = [
         [InlineKeyboardButton("📌 My ETFs", callback_data="menu:list")],
@@ -202,7 +182,6 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     with sql_lock:
         rows = c.execute("SELECT ticker, threshold, rebound_enabled FROM subs WHERE chat_id=?", (chat_id,)).fetchall()
-
     if not rows:
         return await bot.send_message(chat_id, "❗ Немає підписок", parse_mode="Markdown")
 
@@ -214,20 +193,17 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(f"🔁 Rebound {'ON' if rb else 'OFF'}", callback_data=f"rebound:{t}"),
             InlineKeyboardButton("🗑 Remove", callback_data=f"remove:{t}")
         ])
-
     await bot.send_message(chat_id, "📌 *Мої ETF:* 👇", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
         return await bot.send_message(chat_id, "❗ Формат: /status <ticker>")
-    ticker = context.args[0].upper()
-
-    text, ath = build_status_text(ticker, chat_id)
+    t = context.args[0].upper()
+    text, ath = build_status_text(t, chat_id)
     if not text:
         return await bot.send_message(chat_id, "❗ Немає даних", parse_mode="Markdown")
-
-    chart = build_chart_bytes(ticker, ath)
+    chart = build_chart_bytes(t, ath)
     if chart:
         await bot.send_photo(chat_id, chart, caption=text, parse_mode="Markdown")
     else:
@@ -237,72 +213,82 @@ async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
         return await bot.send_message(chat_id, "❗ Формат: /add <ticker>")
-    ticker = context.args[0].upper()
-
-    now = get_price_now(ticker)
-    ath, ath_date = get_ath_52w(ticker)
+    t = context.args[0].upper()
+    now = get_price_now(t)
+    ath, ath_date = get_ath_52w(t)
     if now is None or ath is None:
         return await bot.send_message(chat_id, "❗ Невалідний тікер або немає даних")
-
-    ago_price = get_price_365d_ago(ticker) or now
-    yc = calc_year_change(now, ago_price)
-
-    msg = f"✔ *{ticker} додано*\n💰 `{now:.2f} USD`\n📆 ATH `{ath:.2f} ({ath_date})`"
-    if yc is not None:
-        msg += f"\nΔ365 `{yc:.2f}%`"
-
-    chart = build_chart_bytes(ticker, ath)
+    ago = get_price_365d_ago(t) or now
+    msg = f"✔ *{t} додано*\n💰 `{now:.2f} USD`\n📆 ATH `{ath:.2f} ({ath_date})`"
+    chart = build_chart_bytes(t, ath)
     if chart:
         await bot.send_photo(chat_id, chart, caption=msg, parse_mode="Markdown")
     else:
         await bot.send_message(chat_id, msg, parse_mode="Markdown")
-
     with sql_lock:
-        c.execute(
-            "INSERT OR IGNORE INTO subs(ticker,chat_id,threshold,rebound_enabled,last_alerted,rebound_sent,price_365d_ago) VALUES(?,?,?,?,?,?,?)",
-            (ticker, chat_id, 5.0, 1, 0, 0, ago_price)
-        )
+        c.execute("INSERT OR IGNORE INTO subs(ticker,chat_id,threshold,rebound_enabled,last_alerted,rebound_sent,price_365d_ago) VALUES(?,?,?,?,?,?,?)", (t, chat_id, 5.0, 1, 0, 0, ago))
     db.commit()
-    await bot.send_message(chat_id, f"✔ Підписано на {ticker}")
 
 async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
         return await bot.send_message(chat_id, "❗ Формат: /remove <ticker>")
-    ticker = context.args[0].upper()
-
+    t = context.args[0].upper()
     with sql_lock:
-        c.execute("DELETE FROM subs WHERE ticker=? AND chat_id=?", (ticker, chat_id))
+        c.execute("DELETE FROM subs WHERE ticker=? AND chat_id=?", (t, chat_id))
     db.commit()
-    await bot.send_message(chat_id, f"🗑 {ticker} видалено ✔")
-
-async def threshold_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if len(context.args) < 2:
-        return await bot.send_message(chat_id, "❗ Формат: /threshold <ticker> <value>")
-    ticker, value = context.args[0].upper(), float(context.args[1])
-
-    with sql_lock:
-        c.execute("UPDATE subs SET threshold=?, last_alerted=0, rebound_sent=0 WHERE ticker=? AND chat_id=?", (value, ticker, chat_id))
-    db.commit()
-    await bot.send_message(chat_id, f"✔ Поріг {ticker} = {value}% ✔")
+    await bot.send_message(chat_id, f"🗑 {t} removed ✔", parse_mode="Markdown")
 
 async def rebound_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if len(context.args) < 2:
         return await bot.send_message(chat_id, "❗ Формат: /rebound <ticker> ON/OFF")
-    ticker, state = context.args[0].upper(), context.args[1].upper()
-    new = 1 if state == "ON" else 0
-
+    t, st = context.args[0].upper(), context.args[1].upper()
+    new = 1 if st == "ON" else 0
     with sql_lock:
-        c.execute("UPDATE subs SET rebound_enabled=?, rebound_sent=0 WHERE ticker=? AND chat_id=?", (new, ticker, chat_id))
+        c.execute("UPDATE subs SET rebound_enabled=?, rebound_sent=0 WHERE ticker=? AND chat_id=?", (new, t, chat_id))
     db.commit()
-    await bot.send_message(chat_id, f"🔁 Rebound {ticker}: {state} ✔", parse_mode="Markdown")
+    await bot.send_message(chat_id, f"🔁 *Rebound {t}: {st}* ✔", parse_mode="Markdown")
+
+async def threshold_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if len(context.args) < 2:
+        return await bot.send_message(chat_id, "❗ Формат: /threshold <ticker> <value>")
+    t, v = context.args[0].upper(), float(context.args[1])
+    with sql_lock:
+        c.execute("UPDATE subs SET threshold=?, last_alerted=0, rebound_sent=0 WHERE ticker=? AND chat_id=?", (v, t, chat_id))
+    db.commit()
+    await bot.send_message(chat_id, f"✔ *Threshold {t} = {v}%* ✔", parse_mode="Markdown")
+
+async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = (
+        "ℹ️ *Команди:*\n"
+        "/start\n"
+        "/list\n"
+        "/status <ticker>\n"
+        "/add <ticker>\n"
+        "/remove <ticker>\n"
+        "/threshold <ticker> <value>\n"
+        "/rebound <ticker> ON/OFF\n"
+        "/check\n"
+        "/help\n"
+    )
+    await bot.send_message(chat_id, text, parse_mode="Markdown")
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = "📘 *Help:* use /list to manage ETFs, /status <ticker> for details, /add <ticker> to subscribe."
+    await bot.send_message(chat_id, text, parse_mode="Markdown")
 
 async def check_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await status_cmd(update, context)
 
-# ==== REGISTER & RUN ====
+def inline_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # not implemented (buttons handled via patterns)
+    pass
+
+# ==== RUN ====
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
@@ -313,8 +299,17 @@ def main():
     app.add_handler(CommandHandler("threshold", threshold_cmd))
     app.add_handler(CommandHandler("rebound", rebound_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(inline_router))
-    threading.Thread(target=monitor_loop, daemon=True).start()
+    app.add_handler(CommandHandler("commands", commands_cmd))
+    app.add_handler(CommandHandler("check", check_cmd))
+    app.add_handler(CallbackQueryHandler(list_cmd, pattern="^menu:list"))
+    app.add_handler(CallbackQueryHandler(help_cmd, pattern="^menu:help"))
+    app.add_handler(CallbackQueryHandler(check_cmd, pattern="^menu:check"))
+    app.add_handler(CallbackQueryHandler(add_cmd, pattern="^menu:add"))
+    app.add_handler(CallbackQueryHandler(remove_cmd, pattern="^remove:"))
+    app.add_handler(CallbackQueryHandler(rebound_cmd, pattern="^rebound:"))
+    app.add_handler(CallbackQueryHandler(threshold_cmd, pattern="^threshold_set:"))
+    app.add_handler(CallbackQueryHandler(threshold_cmd, pattern="^threshold_choose:"))
+    threading.Thread(target=monitor_loop_runner, daemon=True).start()
     print("Bot running…")
     app.run_polling()
 
