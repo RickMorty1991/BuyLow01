@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
-TOKEN = "ВАШ_BOT_TOKEN"  # <-- заміни на новий токен
+TOKEN = "8404794616:AAGNkrwRfVO9Nib0UxzvuYTJ2MElpItrkcQ"  # <-- заміни на новий токен
 CHAT_ID = 409544912
 INTERVAL = 600  # 10 хв
 
