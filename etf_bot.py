@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("8404794616:AAG_h14w76Pn6bOCS3Hxokd2ddHIsHcfyDM")  # ❗ ENV
+BOT_TOKEN = os.getenv("8404794616:AAEZPLmugKOZBMt57k-FgIf7XM9OMF38ifE")  # ❗ ENV
 CHECK_INTERVAL = 900
 DB_PATH = "etf.db"
 
