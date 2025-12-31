@@ -3,8 +3,9 @@ import sqlite3
 import time
 import threading
 import io
-import logging
 import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+from threading import Lock
 
 from telegram import (
     Update,
@@ -14,205 +15,87 @@ from telegram import (
 from telegram.ext import (
     Application,
     CommandHandler,
-    ContextTypes,
     CallbackQueryHandler,
+    ContextTypes,
 )
 
-# ================= CONFIG =================
-TOKEN = "8404794616:AAHiLBLeHrDOZbi7D3maK58AkQpheDLkUQ8"
-CHECK_INTERVAL = 600  # seconds
+# ================== CONFIG ==================
+TELEGRAM_TOKEN = "8404794616:AAHiLBLeHrDOZbi7D3maK58AkQpheDLkUQ8"
+CHECK_INTERVAL = 900  # 15 min
+DB_PATH = "etf.db"
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("ETF-BOT")
+lock = Lock()
 
-# ================= DATABASE =================
-db = sqlite3.connect("etf_bot.db", check_same_thread=False)
+# ================== DB ==================
+db = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = db.cursor()
-lock = threading.Lock()
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS subs (
-    ticker TEXT,
     chat_id INTEGER,
-    threshold REAL DEFAULT 5.0,
+    ticker TEXT,
+    threshold REAL DEFAULT 5,
     rebound_enabled INTEGER DEFAULT 1,
     last_alerted INTEGER DEFAULT 0,
     rebound_sent INTEGER DEFAULT 0,
-    price_365d_ago REAL DEFAULT 0,
-    PRIMARY KEY (ticker, chat_id)
+    PRIMARY KEY (chat_id, ticker)
 )
 """)
 db.commit()
 
-# ================= HELPERS =================
-def yf_safe_history(ticker, period):
+# ================== PRICE HELPERS ==================
+def get_price_now(t):
     try:
-        df = yf.Ticker(ticker).history(period=period)
-        return df if not df.empty else None
-    except Exception:
+        return yf.Ticker(t).history(period="1d")["Close"][-1]
+    except:
         return None
 
-def get_price_now(ticker):
-    df = yf_safe_history(ticker, "1d")
-    return float(df["Close"].iloc[-1]) if df is not None else None
+def get_price_365d_ago(t):
+    try:
+        h = yf.Ticker(t).history(period="1y")
+        return h["Close"][0]
+    except:
+        return None
 
-def get_ath_52w(ticker):
-    df = yf_safe_history(ticker, "1y")
-    if df is None:
+def get_ath_52w(t):
+    try:
+        h = yf.Ticker(t).history(period="1y")
+        idx = h["Close"].idxmax()
+        return h["Close"].max(), idx.date()
+    except:
         return None, None
-    ath = float(df["Close"].max())
-    date = df["Close"].idxmax().strftime("%Y-%m-%d")
-    return ath, date
-
-def get_price_365d_ago(ticker):
-    df = yf_safe_history(ticker, "1y")
-    return float(df["Close"].iloc[0]) if df is not None else None
 
 def calc_change(now, ago):
-    if not now or not ago:
-        return None
-    return (now - ago) / ago * 100
+    if now and ago:
+        return (now - ago) / ago * 100
+    return None
 
 def build_chart(ticker, ath):
-    df = yf_safe_history(ticker, "1y")
-    if df is None:
+    try:
+        h = yf.Ticker(ticker).history(period="1y")
+        plt.figure(figsize=(6, 3))
+        plt.plot(h.index, h["Close"])
+        plt.axhline(ath, linestyle="--")
+        plt.title(ticker)
+        buf = io.BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, format="png")
+        plt.close()
+        buf.seek(0)
+        return buf
+    except:
         return None
 
-    buf = io.BytesIO()
-    plt.figure()
-    plt.plot(df["Close"])
-    plt.axhline(ath)
-    plt.title(f"{ticker} — 52W ATH")
-    plt.savefig(buf, format="png")
-    plt.close()
-    buf.seek(0)
-    return buf
-
-# ================= BOT COMMANDS =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [
-        [InlineKeyboardButton("📌 My ETFs", callback_data="menu:list")],
-        [InlineKeyboardButton("➕ Add ETF", callback_data="menu:add")],
-        [InlineKeyboardButton("❓ Help", callback_data="menu:help")],
-    ]
-    await update.message.reply_text(
-        "🤖 *ETF Monitor Bot*",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(kb),
-    )
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "/add <ticker>\n"
-        "/list\n"
-        "/status <ticker>\n"
-        "/threshold <ticker> <value>\n"
-        "/rebound <ticker> ON/OFF"
-    )
-
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("❗ /add TICKER")
-
-    ticker = context.args[0].upper()
-    now = get_price_now(ticker)
-    ath, _ = get_ath_52w(ticker)
-
-    if not now or not ath:
-        return await update.message.reply_text("❌ Invalid ticker")
-
-    ago = get_price_365d_ago(ticker) or now
-
-    with lock:
-        c.execute(
-            "INSERT OR IGNORE INTO subs VALUES (?,?,?,?,?,?,?)",
-            (ticker, update.effective_chat.id, 5, 1, 0, 0, ago),
-        )
-        db.commit()
-
-    await update.message.reply_text(f"✔ {ticker} added")
-
-async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with lock:
-        rows = c.execute(
-            "SELECT ticker, threshold, rebound_enabled FROM subs WHERE chat_id=?",
-            (update.effective_chat.id,),
-        ).fetchall()
-
-    if not rows:
-        return await update.message.reply_text("❗ No ETFs")
-
-    kb = []
-    for t, th, rb in rows:
-        kb.append([
-            InlineKeyboardButton("📊", callback_data=f"status:{t}"),
-            InlineKeyboardButton(f"📉 {th}%", callback_data=f"th:{t}"),
-            InlineKeyboardButton("🔁" if rb else "⛔", callback_data=f"rb:{t}"),
-            InlineKeyboardButton("🗑", callback_data=f"rm:{t}"),
-        ])
-
-    await update.message.reply_text("📌 ETFs:", reply_markup=InlineKeyboardMarkup(kb))
-
-# ================= CALLBACK ROUTER =================
-async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    chat = q.message.chat.id
-    data = q.data
-
-    if data == "menu:list":
-        return await list_cmd(update, context)
-
-    if data == "menu:add":
-        return await q.message.reply_text("Use /add TICKER")
-
-    if data.startswith("status:"):
-        t = data.split(":")[1]
-        now = get_price_now(t)
-        ath, date = get_ath_52w(t)
-        ago = get_price_365d_ago(t)
-        dd = (ath - now) / ath * 100
-        ch = calc_change(now, ago)
-
-        msg = f"*{t}*\n💰 {now:.2f}\n📉 DD {dd:.2f}%"
-        if ch:
-            msg += f"\nΔ365 {ch:.2f}%"
-
-        chart = build_chart(t, ath)
-        if chart:
-            await q.message.reply_photo(chart, caption=msg, parse_mode="Markdown")
-        else:
-            await q.message.reply_text(msg, parse_mode="Markdown")
-
-    if data.startswith("rm:"):
-        t = data.split(":")[1]
-        with lock:
-            c.execute("DELETE FROM subs WHERE ticker=? AND chat_id=?", (t, chat))
-            db.commit()
-        await q.message.reply_text(f"🗑 {t} removed")
-
-    if data.startswith("rb:"):
-        t = data.split(":")[1]
-        with lock:
-            row = c.execute(
-                "SELECT rebound_enabled FROM subs WHERE ticker=? AND chat_id=?",
-                (t, chat),
-            ).fetchone()
-            new = 0 if row and row[0] else 1
-            c.execute(
-                "UPDATE subs SET rebound_enabled=?, rebound_sent=0 WHERE ticker=? AND chat_id=?",
-                (new, t, chat),
-            )
-            db.commit()
-        await q.message.reply_text(f"🔁 {t} {'ON' if new else 'OFF'}")
-
-# ================= MONITOR =================
-def monitor(app: Application):
+# ================== MONITOR LOOP ==================
+def monitor_loop(app: Application):
     while True:
         with lock:
-            rows = c.execute("SELECT * FROM subs").fetchall()
+            rows = c.execute(
+                "SELECT chat_id, ticker, threshold, rebound_enabled, last_alerted, rebound_sent "
+                "FROM subs"
+            ).fetchall()
 
-        for t, chat, th, rb, alerted, sent, ago in rows:
+        for chat_id, t, th, rb, la, rs in rows:
             now = get_price_now(t)
             ath, _ = get_ath_52w(t)
             if not now or not ath:
@@ -220,29 +103,198 @@ def monitor(app: Application):
 
             dd = (ath - now) / ath * 100
 
-            if dd >= th and alerted == 0:
-                app.bot.send_message(chat, f"⚠️ {t} DD {dd:.2f}%")
+            # ALERT
+            if dd >= th and la == 0:
+                app.bot.send_message(
+                    chat_id,
+                    f"⚠️ *{t}*\n📉 Drawdown {dd:.2f}%",
+                    parse_mode="Markdown",
+                )
                 with lock:
                     c.execute(
-                        "UPDATE subs SET last_alerted=1 WHERE ticker=? AND chat_id=?",
-                        (t, chat),
+                        "UPDATE subs SET last_alerted=1, rebound_sent=0 WHERE chat_id=? AND ticker=?",
+                        (chat_id, t),
+                    )
+                    db.commit()
+
+            # REBOUND
+            if dd < th and rb and la and not rs:
+                app.bot.send_message(
+                    chat_id,
+                    f"📈 *{t}* rebound\nDD {dd:.2f}%",
+                    parse_mode="Markdown",
+                )
+                with lock:
+                    c.execute(
+                        "UPDATE subs SET rebound_sent=1 WHERE chat_id=? AND ticker=?",
+                        (chat_id, t),
+                    )
+                    db.commit()
+
+            # RESET
+            if dd >= th and rs:
+                with lock:
+                    c.execute(
+                        "UPDATE subs SET rebound_sent=0 WHERE chat_id=? AND ticker=?",
+                        (chat_id, t),
                     )
                     db.commit()
 
         time.sleep(CHECK_INTERVAL)
 
-# ================= MAIN =================
-def main():
-    app = Application.builder().token(TOKEN).build()
+# ================== COMMANDS ==================
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [
+        [InlineKeyboardButton("📌 My ETFs", callback_data="menu:list")],
+        [InlineKeyboardButton("➕ Add ETF", callback_data="menu:add")],
+        [InlineKeyboardButton("❓ Help", callback_data="menu:help")],
+    ]
+    await update.message.reply_text(
+        "ETF Monitor Bot",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("add", add))
-    app.add_handler(CommandHandler("list", list_cmd))
+async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return await update.message.reply_text("Use: /add TICKER")
+
+    t = context.args[0].upper()
+    with lock:
+        c.execute(
+            "INSERT OR IGNORE INTO subs(chat_id, ticker) VALUES(?,?)",
+            (update.message.chat.id, t),
+        )
+        db.commit()
+    await update.message.reply_text(f"✔ {t} added")
+
+# ================== CALLBACK ROUTER ==================
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat.id
+    data = q.data
+
+    # MENU
+    if data == "menu:list":
+        with lock:
+            rows = c.execute(
+                "SELECT ticker, threshold, rebound_enabled FROM subs WHERE chat_id=?",
+                (chat_id,),
+            ).fetchall()
+
+        if not rows:
+            return await q.message.reply_text("❗ No ETFs")
+
+        kb = []
+        for t, th, rb in rows:
+            kb.append([
+                InlineKeyboardButton("📊", callback_data=f"st:{t}"),
+                InlineKeyboardButton(f"📉 {th}%", callback_data=f"th:{t}"),
+                InlineKeyboardButton("🔁 ON" if rb else "🔁 OFF", callback_data=f"rb:{t}"),
+                InlineKeyboardButton("🗑", callback_data=f"rm:{t}"),
+            ])
+
+        return await q.message.reply_text(
+            "📌 *My ETFs*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+
+    if data == "menu:add":
+        return await q.message.reply_text("Use: /add TICKER")
+
+    if data == "menu:help":
+        return await q.message.reply_text(
+            "/start\n/add TICKER\n\nButtons control everything"
+        )
+
+    # STATUS
+    if data.startswith("st:"):
+        t = data.split(":")[1]
+        now = get_price_now(t)
+        ath, date = get_ath_52w(t)
+        ago = get_price_365d_ago(t)
+        dd = (ath - now) / ath * 100
+        ch = calc_change(now, ago)
+
+        msg = (
+            f"*{t}*\n"
+            f"💰 {now:.2f} USD\n"
+            f"📉 DD {dd:.2f}%\n"
+            f"📆 ATH {ath:.2f} ({date})"
+        )
+        if ch is not None:
+            msg += f"\nΔ365 {ch:.2f}%"
+
+        chart = build_chart(t, ath)
+        if chart:
+            return await q.message.reply_photo(chart, caption=msg, parse_mode="Markdown")
+        return await q.message.reply_text(msg, parse_mode="Markdown")
+
+    # REMOVE
+    if data.startswith("rm:"):
+        t = data.split(":")[1]
+        with lock:
+            c.execute(
+                "DELETE FROM subs WHERE chat_id=? AND ticker=?",
+                (chat_id, t),
+            )
+            db.commit()
+        return await q.message.reply_text(f"🗑 {t} removed")
+
+    # REBOUND
+    if data.startswith("rb:"):
+        t = data.split(":")[1]
+        with lock:
+            cur = c.execute(
+                "SELECT rebound_enabled FROM subs WHERE chat_id=? AND ticker=?",
+                (chat_id, t),
+            ).fetchone()
+            new = 0 if cur and cur[0] else 1
+            c.execute(
+                "UPDATE subs SET rebound_enabled=?, rebound_sent=0 WHERE chat_id=? AND ticker=?",
+                (new, chat_id, t),
+            )
+            db.commit()
+        return await q.message.reply_text(f"🔁 {t} {'ON' if new else 'OFF'}")
+
+    # THRESHOLD
+    if data.startswith("th:"):
+        t = data.split(":")[1]
+        kb = [
+            [InlineKeyboardButton(p + "%", callback_data=f"ths:{t}:{p}")]
+            for p in ["3", "5", "7", "10"]
+        ]
+        return await q.message.reply_text(
+            f"📉 Threshold for {t}",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+
+    if data.startswith("ths:"):
+        _, t, val = data.split(":")
+        with lock:
+            c.execute(
+                "UPDATE subs SET threshold=?, last_alerted=0 WHERE chat_id=? AND ticker=?",
+                (float(val), chat_id, t),
+            )
+            db.commit()
+        return await q.message.reply_text(f"✔ {t} = {val}%")
+
+# ================== MAIN ==================
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("add", add_cmd))
     app.add_handler(CallbackQueryHandler(callbacks))
 
-    threading.Thread(target=monitor, args=(app,), daemon=True).start()
-    log.info("Bot started")
+    threading.Thread(
+        target=monitor_loop,
+        args=(app,),
+        daemon=True,
+    ).start()
+
+    print("Bot running...")
     app.run_polling()
 
 if __name__ == "__main__":
