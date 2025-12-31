@@ -1,4 +1,3 @@
-python
 import yfinance as yf
 import sqlite3
 import time
