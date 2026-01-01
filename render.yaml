@@ -1,2 +1,12 @@
-runtime: python3
-start: python app.py
+services:
+  - type: worker
+    name: buylow-telegram-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHECK_INTERVAL
+        value: 900

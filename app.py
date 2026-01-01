@@ -1,33 +1,27 @@
-from telegram.ext import Application
-
-from config import BOT_TOKEN
-
-from callbacks import callbacks
-
-from monitor import monitor_loop
-
-import threading
+from telegram.ext import Application, CommandHandler
+from config import BOT_TOKEN, CHECK_INTERVAL
+from db import init_db
+from handlers import start, add
+from monitor import check_prices
 
 
+async def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is not set" )
 
-def main():
+    init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add))
 
-    app.add_handler(CallbackQueryHandler(callbacks))
+    app.job_queue.run_repeating(check_prices, interval=CHECK_INTERVAL, first=10)
 
-
-
-    threading.Thread(target=monitor_loop, args=(app,), daemon=True).start()
-
-    print("Bot running...")
-
-    app.run_polling()
-
+    print("✅ BuyLow Bot запущений (Render)")
+    await app.run_polling()
 
 
 if __name__ == "__main__":
-
-    main()
+    import asyncio
+    asyncio.run(main())
