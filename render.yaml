@@ -1,11 +1,9 @@
 services:
   - type: worker
     name: buylow-telegram-bot
-    env: python
-    runtime: python-3.11
+    env: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    dockerfilePath: Dockerfile
     envVars:
       - key: BOT_TOKEN
         sync: false
