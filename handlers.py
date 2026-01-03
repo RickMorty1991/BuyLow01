@@ -1,39 +1,37 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from db import add_etf, get_all_etfs
+from utils import get_main_menu_keyboard
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    etfs = get_all_etfs()
-
-    if not etfs:
-        await update.message.reply_text("📭 Список порожній. Додай ETF командою /add")
-        return
-
-    text = "📉 Відстежувані ETF:\n"
-    keyboard = []
-
-    for ticker, price in etfs:
-        text += f"• {ticker} — {price}\n"
-        keyboard.append([
-            InlineKeyboardButton(
-                f"🗑 {ticker}",
-                callback_data=f"remove:{ticker}"
-            )
-        ])
-
+    """Handle /start command - show main menu."""
+    welcome_text = (
+        "👋 Вітаю! Я BuyLow Bot.\n\n"
+        "Я допоможу відстежувати ціни на ETF та сповіщати, коли вони досягнуть цільового рівня.\n\n"
+        "Оберіть дію:"
+    )
+    
     await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        welcome_text,
+        reply_markup=get_main_menu_keyboard()
     )
 
 
 async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /add command."""
     if not context.args:
-        await update.message.reply_text("❗ Використання: /add AAPL")
+        await update.message.reply_text(
+            "❗ Використання: /add AAPL\n\n"
+            "Або використайте кнопку ➕ Add ETF",
+            reply_markup=get_main_menu_keyboard()
+        )
         return
 
     ticker = context.args[0].upper()
     add_etf(ticker)
 
-    await update.message.reply_text(f"✅ {ticker} додано")
+    await update.message.reply_text(
+        f"✅ {ticker} додано",
+        reply_markup=get_main_menu_keyboard()
+    )
