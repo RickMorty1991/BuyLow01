@@ -7,13 +7,17 @@ from monitor import check_prices
 
 
 async def price_loop(app: Application):
-    await asyncio.sleep(10)  # startup delay
+    await asyncio.sleep(10)
     while True:
         try:
             await check_prices(app)
         except Exception as e:
             print("Price loop error:", e)
         await asyncio.sleep(CHECK_INTERVAL)
+
+
+async def post_init(application: Application):
+    asyncio.create_task(price_loop(application))
 
 
 def main():
@@ -27,10 +31,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
 
-    # ✅ schedule background task on PTB loop
-    app.post_init = lambda application: application.create_task(
-        price_loop(application)
-    )
+    # ✅ correct hook
+    app.post_init = post_init
 
     print("✅ BuyLow Bot запущений (Render)")
     app.run_polling()
