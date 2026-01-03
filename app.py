@@ -3,7 +3,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
 )
-from telegram.error import Conflict, RetryAfter, TimedOut
+from telegram.error import Conflict, RetryAfter, TimedOut, BadRequest
 from config import BOT_TOKEN, CHECK_INTERVAL
 from db import init_db
 from handlers import start, add
@@ -51,6 +51,18 @@ async def error_handler(update, context):
     if isinstance(error, TimedOut):
         print("⚠️  Request timed out. Retrying...")
         return
+    
+    # Ignore "Message is not modified" errors - these are harmless
+    if isinstance(error, BadRequest):
+        if "not modified" in str(error).lower():
+            # This happens when trying to edit a message with the same content
+            # It's not really an error, just Telegram saying nothing changed
+            if update and update.callback_query:
+                try:
+                    await update.callback_query.answer()
+                except Exception:
+                    pass
+            return
     
     # Log other errors with context
     error_msg = f"❌ Error in error_handler: {error}"

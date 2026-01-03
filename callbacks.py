@@ -1,4 +1,5 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 from db import remove_etf, get_all_etfs, add_etf
 from utils import get_main_menu_keyboard
@@ -35,22 +36,49 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data.split(":", 1)[1]
         
         if action == "add":
-            await query.edit_message_text(
-                "➕ Додати ETF\n\n"
-                "Відправте команду:\n"
-                "`/add TICKER`\n\n"
-                "Наприклад: `/add AAPL`",
-                reply_markup=get_main_menu_keyboard()
+            try:
+                await query.edit_message_text(
+                    "➕ Додати ETF\n\n"
+                    "Відправте команду:\n"
+                    "`/add TICKER`\n\n"
+                    "Наприклад: `/add AAPL`",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
+        
+        elif action == "back":
+            # Go back to main menu
+            welcome_text = (
+                "👋 Вітаю! Я BuyLow Bot.\n\n"
+                "Я допоможу відстежувати ціни на ETF та сповіщати, коли вони досягнуть цільового рівня.\n\n"
+                "Оберіть дію:"
             )
+            try:
+                await query.edit_message_text(
+                    welcome_text,
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
         
         elif action == "list":
             etfs = get_all_etfs()
             if not etfs:
-                await query.edit_message_text(
-                    "📭 Список порожній\n\n"
-                    "Додайте ETF командою /add або кнопкою ➕ Add ETF",
-                    reply_markup=get_main_menu_keyboard()
-                )
+                try:
+                    await query.edit_message_text(
+                        "📭 Список порожній\n\n"
+                        "Додайте ETF командою /add або кнопкою ➕ Add ETF",
+                        reply_markup=get_main_menu_keyboard()
+                    )
+                except BadRequest as e:
+                    if "not modified" in str(e).lower():
+                        # Message is already showing this content, ignore
+                        pass
+                    else:
+                        raise
             else:
                 text = "📉 Відстежувані ETF:\n\n"
                 keyboard = []
@@ -65,47 +93,70 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     ])
                 
-                # Add back button
+                # Add back button to main menu
                 keyboard.append([
-                    InlineKeyboardButton("◀️ Назад", callback_data="action:list")
+                    InlineKeyboardButton("◀️ Назад до меню", callback_data="action:back")
                 ])
                 
-                await query.edit_message_text(
-                    text,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
+                try:
+                    await query.edit_message_text(
+                        text,
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except BadRequest as e:
+                    if "not modified" in str(e).lower():
+                        # Message is already showing this content, ignore
+                        pass
+                    else:
+                        raise
         
         elif action == "threshold":
-            await query.edit_message_text(
-                "↘️ Встановити поріг\n\n"
-                "Функція в розробці.\n"
-                "Поки що використовуйте команду /add TICKER PRICE",
-                reply_markup=get_main_menu_keyboard()
-            )
+            try:
+                await query.edit_message_text(
+                    "↘️ Встановити поріг\n\n"
+                    "Функція в розробці.\n"
+                    "Поки що використовуйте команду /add TICKER PRICE",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
         
         elif action == "rebound":
-            await query.edit_message_text(
-                "📈 Перемикач відскоку\n\n"
-                "Функція в розробці.",
-                reply_markup=get_main_menu_keyboard()
-            )
+            try:
+                await query.edit_message_text(
+                    "📈 Перемикач відскоку\n\n"
+                    "Функція в розробці.",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
         
         elif action == "check":
-            await query.edit_message_text(
-                "🔄 Перевірка всіх ETF...\n\n"
-                "Функція в розробці.",
-                reply_markup=get_main_menu_keyboard()
-            )
+            try:
+                await query.edit_message_text(
+                    "🔄 Перевірка всіх ETF...\n\n"
+                    "Функція в розробці.",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
         
         elif action == "status":
             etfs = get_all_etfs()
             count = len(etfs) if etfs else 0
-            await query.edit_message_text(
-                f"📊 Статус бота\n\n"
-                f"ETF у списку: {count}\n"
-                f"Бот працює ✅",
-                reply_markup=get_main_menu_keyboard()
-            )
+            try:
+                await query.edit_message_text(
+                    f"📊 Статус бота\n\n"
+                    f"ETF у списку: {count}\n"
+                    f"Бот працює ✅",
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
         
         elif action == "help":
             help_text = (
@@ -122,10 +173,14 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📊 Status - Статус бота\n"
                 "❓ Help - Ця довідка"
             )
-            await query.edit_message_text(
-                help_text,
-                reply_markup=get_main_menu_keyboard()
-            )
+            try:
+                await query.edit_message_text(
+                    help_text,
+                    reply_markup=get_main_menu_keyboard()
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
     
     # Handle remove action
     elif data.startswith("remove:"):
@@ -156,16 +211,20 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 ])
             
-            # Add back button
+            # Add back button to main menu
             keyboard.append([
-                InlineKeyboardButton("◀️ Назад", callback_data="action:list")
+                InlineKeyboardButton("◀️ Назад до меню", callback_data="action:back")
             ])
 
-            await query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            print(f"✅ Successfully removed {ticker} and updated message")
+            try:
+                await query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                print(f"✅ Successfully removed {ticker} and updated message")
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
         except Exception as e:
             print(f"❌ Error processing remove callback: {e}")
             import traceback
