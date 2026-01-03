@@ -3,12 +3,14 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
 )
+from telegram.error import Conflict
 from config import BOT_TOKEN, CHECK_INTERVAL
 from db import init_db
 from handlers import start, add
 from callbacks import callbacks
 import asyncio
 from monitor import check_prices
+import sys
 
 
 async def price_loop(app: Application):
@@ -43,7 +45,20 @@ def main():
     app.post_init = post_init
 
     print("✅ BuyLow Bot запущений (Render)")
-    app.run_polling()
+    try:
+        app.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"]
+        )
+    except Conflict as e:
+        print(f"⚠️  Conflict detected: {e}")
+        print("Another bot instance is running. Exiting gracefully...")
+        sys.exit(0)
+    except KeyboardInterrupt:
+        print("Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        raise
 
 
 if __name__ == "__main__":
