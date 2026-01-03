@@ -3,7 +3,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
 )
-from telegram.error import Conflict
+from telegram.error import Conflict, RetryAfter, TimedOut
 from config import BOT_TOKEN, CHECK_INTERVAL
 from db import init_db
 from handlers import start, add
@@ -11,6 +11,31 @@ from callbacks import callbacks
 import asyncio
 from monitor import check_prices
 import sys
+import time
+
+
+async def error_handler(update, context):
+    """Handle errors during update processing."""
+    error = context.error
+    
+    if isinstance(error, Conflict):
+        print(f"⚠️  Conflict detected: Another bot instance is running.")
+        print("Waiting 30 seconds before retrying...")
+        await asyncio.sleep(30)
+        # Don't raise, let the updater retry
+        return
+    
+    if isinstance(error, RetryAfter):
+        print(f"⚠️  Rate limited. Waiting {error.retry_after} seconds...")
+        await asyncio.sleep(error.retry_after)
+        return
+    
+    if isinstance(error, TimedOut):
+        print("⚠️  Request timed out. Retrying...")
+        return
+    
+    # Log other errors
+    print(f"❌ Error: {error}", file=sys.stderr)
 
 
 async def price_loop(app: Application):
@@ -24,6 +49,15 @@ async def price_loop(app: Application):
 
 
 async def post_init(app: Application):
+    # Close any existing webhook to avoid conflicts
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook cleared (if any)")
+    except Exception as e:
+        print(f"⚠️  Could not clear webhook: {e}")
+    
+    # Small delay to ensure any previous instance has stopped
+    await asyncio.sleep(2)
     asyncio.create_task(price_loop(app))
 
 
@@ -41,19 +75,26 @@ def main():
 
     # 🔥 КНОПКИ
     app.add_handler(CallbackQueryHandler(callbacks))
+    
+    # Error handler for Conflict and other errors
+    app.add_error_handler(error_handler)
 
     app.post_init = post_init
 
     print("✅ BuyLow Bot запущений (Render)")
+    
+    # Add a delay before starting polling to avoid conflicts during deployment
+    # This gives time for any previous instance to fully stop
+    print("⏳ Waiting 5 seconds before starting polling...")
+    time.sleep(5)
+    
     try:
         app.run_polling(
             drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"]
+            allowed_updates=["message", "callback_query"],
+            close_loop=False,
+            stop_signals=None  # Let Render handle signals
         )
-    except Conflict as e:
-        print(f"⚠️  Conflict detected: {e}")
-        print("Another bot instance is running. Exiting gracefully...")
-        sys.exit(0)
     except KeyboardInterrupt:
         print("Bot stopped by user")
     except Exception as e:
