@@ -29,3 +29,4 @@ async def check_prices(context):
                     "DELETE FROM subs WHERE chat_id=? AND ticker=?",
                     (chat_id, ticker)
                 )
+                conn.commit()

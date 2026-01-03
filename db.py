@@ -1,6 +1,5 @@
 import sqlite3
-
-DB_PATH = "etf.db"
+from config import DB_PATH
 
 
 def get_conn():
@@ -13,6 +12,14 @@ def init_db():
             CREATE TABLE IF NOT EXISTS etfs (
                 ticker TEXT PRIMARY KEY,
                 target_price REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS subs (
+                chat_id INTEGER,
+                ticker TEXT,
+                threshold REAL,
+                PRIMARY KEY (chat_id, ticker)
             )
         """)
         conn.commit()
