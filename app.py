@@ -14,13 +14,23 @@ import sys
 import time
 import logging
 
-# Configure logging to reduce verbosity of Conflict errors during deployment
+# Custom filter to suppress Conflict error messages
+class ConflictFilter(logging.Filter):
+    def filter(self, record):
+        # Suppress Conflict error messages - they're handled automatically
+        if 'Conflict' in record.getMessage() and 'getUpdates' in record.getMessage():
+            return False
+        return True
+
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-# Reduce verbosity of telegram library's internal conflict logging
-logging.getLogger('telegram.ext._updater').setLevel(logging.WARNING)
+
+# Apply filter to suppress Conflict errors from updater
+updater_logger = logging.getLogger('telegram.ext.Updater')
+updater_logger.addFilter(ConflictFilter())
 
 
 async def error_handler(update, context):
