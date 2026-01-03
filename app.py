@@ -1,8 +1,13 @@
-import asyncio
-from telegram.ext import Application, CommandHandler
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+)
 from config import BOT_TOKEN, CHECK_INTERVAL
 from db import init_db
 from handlers import start, add
+from callbacks import callbacks
+import asyncio
 from monitor import check_prices
 
 
@@ -16,8 +21,8 @@ async def price_loop(app: Application):
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-async def post_init(application: Application):
-    asyncio.create_task(price_loop(application))
+async def post_init(app: Application):
+    asyncio.create_task(price_loop(app))
 
 
 def main():
@@ -28,10 +33,13 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
 
-    # ✅ correct hook
+    # 🔥 КНОПКИ
+    app.add_handler(CallbackQueryHandler(callbacks))
+
     app.post_init = post_init
 
     print("✅ BuyLow Bot запущений (Render)")
