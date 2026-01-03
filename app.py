@@ -18,13 +18,6 @@ async def error_handler(update, context):
     """Handle errors during update processing."""
     error = context.error
     
-    if isinstance(error, Conflict):
-        print(f"⚠️  Conflict detected: Another bot instance is running.")
-        print("Waiting 30 seconds before retrying...")
-        await asyncio.sleep(30)
-        # Don't raise, let the updater retry
-        return
-    
     if isinstance(error, RetryAfter):
         print(f"⚠️  Rate limited. Waiting {error.retry_after} seconds...")
         await asyncio.sleep(error.retry_after)
@@ -34,7 +27,7 @@ async def error_handler(update, context):
         print("⚠️  Request timed out. Retrying...")
         return
     
-    # Log other errors
+    # Log other errors (Conflict errors in updater loop are handled automatically)
     print(f"❌ Error: {error}", file=sys.stderr)
 
 
@@ -56,8 +49,11 @@ async def post_init(app: Application):
     except Exception as e:
         print(f"⚠️  Could not clear webhook: {e}")
     
-    # Small delay to ensure any previous instance has stopped
-    await asyncio.sleep(2)
+    # Additional delay to ensure any previous instance has fully stopped
+    # This is especially important during Render deployments
+    print("⏳ Waiting for any previous instance to stop...")
+    await asyncio.sleep(5)
+    
     asyncio.create_task(price_loop(app))
 
 
@@ -85,10 +81,12 @@ def main():
     
     # Add a delay before starting polling to avoid conflicts during deployment
     # This gives time for any previous instance to fully stop
-    print("⏳ Waiting 5 seconds before starting polling...")
-    time.sleep(5)
+    print("⏳ Waiting 10 seconds before starting polling...")
+    time.sleep(10)
     
     try:
+        # The library will automatically retry on Conflict errors
+        # bootstrap_retries controls how many times to retry on startup
         app.run_polling(
             drop_pending_updates=True,
             allowed_updates=["message", "callback_query"],
