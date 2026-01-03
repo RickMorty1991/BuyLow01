@@ -16,7 +16,7 @@ async def price_loop(app: Application):
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-async def main():
+def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
@@ -27,12 +27,14 @@ async def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
 
-    # ✅ Render-safe background task
-    asyncio.create_task(price_loop(app))
+    # ✅ schedule background task on PTB loop
+    app.post_init = lambda application: application.create_task(
+        price_loop(application)
+    )
 
     print("✅ BuyLow Bot запущений (Render)")
-    await app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
