@@ -53,17 +53,22 @@ async def error_handler(update, context):
         return
     
     # Log other errors with context
-    error_msg = f"❌ Error: {error}"
-    if update and update.callback_query:
-        error_msg += f" (Callback: {update.callback_query.data})"
+    error_msg = f"❌ Error in error_handler: {error}"
+    if update:
+        if update.callback_query:
+            error_msg += f" (Callback: {update.callback_query.data})"
+        elif update.message:
+            error_msg += f" (Message: {update.message.text})"
     print(error_msg, file=sys.stderr)
+    import traceback
+    traceback.print_exc()
     
     # Try to answer callback query if it exists to prevent "loading" state
     if update and update.callback_query:
         try:
-            await update.callback_query.answer("❌ Помилка обробки запиту")
-        except Exception:
-            pass
+            await update.callback_query.answer("❌ Помилка обробки запиту", show_alert=True)
+        except Exception as e:
+            print(f"⚠️  Could not answer callback query: {e}")
 
 
 async def price_loop(app: Application):
@@ -104,8 +109,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add))
 
-    # 🔥 КНОПКИ
-    app.add_handler(CallbackQueryHandler(callbacks))
+    # 🔥 КНОПКИ - Handle all callback queries
+    # Using pattern=None to catch all callbacks
+    app.add_handler(CallbackQueryHandler(callbacks, pattern=None))
     
     # Error handler for Conflict and other errors
     app.add_error_handler(error_handler)
