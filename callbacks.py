@@ -1,11 +1,18 @@
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from db import remove_etf, get_all_etfs
 
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    
+    if not query:
+        return
+    
+    try:
+        await query.answer()
+    except Exception as e:
+        print(f"Error answering callback: {e}")
 
     data = query.data
     print("BUTTON:", data)  # для логів Render
@@ -21,7 +28,18 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         text = "📉 Відстежувані ETF:\n"
+        keyboard = []
+        
         for t, price in etfs:
             text += f"• {t} — {price}\n"
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🗑 {t}",
+                    callback_data=f"remove:{t}"
+                )
+            ])
 
-        await query.edit_message_text(text)
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )

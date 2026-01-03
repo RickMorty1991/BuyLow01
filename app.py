@@ -52,8 +52,18 @@ async def error_handler(update, context):
         print("⚠️  Request timed out. Retrying...")
         return
     
-    # Log other errors
-    print(f"❌ Error: {error}", file=sys.stderr)
+    # Log other errors with context
+    error_msg = f"❌ Error: {error}"
+    if update and update.callback_query:
+        error_msg += f" (Callback: {update.callback_query.data})"
+    print(error_msg, file=sys.stderr)
+    
+    # Try to answer callback query if it exists to prevent "loading" state
+    if update and update.callback_query:
+        try:
+            await update.callback_query.answer("❌ Помилка обробки запиту")
+        except Exception:
+            pass
 
 
 async def price_loop(app: Application):
