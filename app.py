@@ -12,11 +12,26 @@ import asyncio
 from monitor import check_prices
 import sys
 import time
+import logging
+
+# Configure logging to reduce verbosity of Conflict errors during deployment
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+# Reduce verbosity of telegram library's internal conflict logging
+logging.getLogger('telegram.ext._updater').setLevel(logging.WARNING)
 
 
 async def error_handler(update, context):
     """Handle errors during update processing."""
     error = context.error
+    
+    # Ignore Conflict errors - they're handled automatically by the library's retry mechanism
+    # These occur when multiple instances try to poll simultaneously (e.g., during deployment)
+    if isinstance(error, Conflict):
+        # The library will retry automatically, no need to log or handle
+        return
     
     if isinstance(error, RetryAfter):
         print(f"⚠️  Rate limited. Waiting {error.retry_after} seconds...")
@@ -27,7 +42,7 @@ async def error_handler(update, context):
         print("⚠️  Request timed out. Retrying...")
         return
     
-    # Log other errors (Conflict errors in updater loop are handled automatically)
+    # Log other errors
     print(f"❌ Error: {error}", file=sys.stderr)
 
 
