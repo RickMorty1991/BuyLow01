@@ -1,32 +1,29 @@
 import yfinance as yf
-from db import get_conn
-from utils import escape_md
+from db import get_monitor_data, update_last_price
 
 
 async def check_prices(context):
-    bot = context.bot
+    data = get_monitor_data()
 
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT chat_id, ticker, threshold FROM subs"
-        ).fetchall()
-
-    for chat_id, ticker, threshold in rows:
-        try:
-            price = yf.Ticker(ticker).fast_info["lastPrice"]
-        except Exception:
+    for ticker, target, rebound, last_price in data:
+        if not target:
             continue
 
-        if price <= threshold:
-            await bot.send_message(
-                chat_id,
-                f"📉 *{escape_md(ticker)}* = *{price:.2f}* ≤ {threshold}",
-                parse_mode="MarkdownV2"
+        price = yf.Ticker(ticker).fast_info["lastPrice"]
+
+        trigger = False
+
+        if rebound:
+            if last_price and last_price < target and price > last_price:
+                trigger = True
+        else:
+            if price <= target:
+                trigger = True
+
+        if trigger:
+            await context.bot.send_message(
+                chat_id=context.bot_data["chat_id"],
+                text=f"🚨 {ticker}\nЦіна: {price}\nПоріг: {target}"
             )
 
-            with get_conn() as conn:
-                conn.execute(
-                    "DELETE FROM subs WHERE chat_id=? AND ticker=?",
-                    (chat_id, ticker)
-                )
-                conn.commit()
+        update_last_price(ticker, price)
