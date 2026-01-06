@@ -20,13 +20,6 @@ def init_db():
         conn.commit()
 
 
-def get_all_etfs():
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT ticker, target_price FROM etfs"
-        ).fetchall()
-
-
 def add_etf(ticker):
     with get_conn() as conn:
         conn.execute(
@@ -34,6 +27,13 @@ def add_etf(ticker):
             (ticker.upper(),)
         )
         conn.commit()
+
+
+def get_all_etfs():
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT ticker, target_price FROM etfs"
+        ).fetchall()
 
 
 def set_threshold(ticker, price):
@@ -47,13 +47,21 @@ def set_threshold(ticker, price):
 
 def toggle_rebound():
     with get_conn() as conn:
-        cur = conn.execute("SELECT rebound FROM etfs LIMIT 1")
-        row = cur.fetchone()
-        new_state = 0 if row and row[0] else 1
+        row = conn.execute(
+            "SELECT rebound FROM etfs LIMIT 1"
+        ).fetchone()
 
+        new_state = 0 if row and row[0] else 1
         conn.execute("UPDATE etfs SET rebound=?", (new_state,))
         conn.commit()
         return bool(new_state)
+
+
+def get_monitor_data():
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT ticker, target_price, rebound, last_price FROM etfs"
+        ).fetchall()
 
 
 def update_last_price(ticker, price):
@@ -63,10 +71,3 @@ def update_last_price(ticker, price):
             (price, ticker)
         )
         conn.commit()
-
-
-def get_monitor_data():
-    with get_conn() as conn:
-        return conn.execute(
-            "SELECT ticker, target_price, rebound, last_price FROM etfs"
-        ).fetchall()
