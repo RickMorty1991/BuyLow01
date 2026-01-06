@@ -16,7 +16,7 @@ async def callback_handler(update, context):
     await query.answer()
     data = query.data
 
-    # ---------- SET THRESHOLD ----------
+    # ---- SET THRESHOLD ----
     if data == "action:threshold":
         etfs = get_all_etfs()
 
@@ -42,14 +42,17 @@ async def callback_handler(update, context):
             f"✏️ Введіть цільову ціну для {ticker}:"
         )
 
-    # ---------- TOGGLE REBOUND ----------
+    # ---- TOGGLE REBOUND ----
     elif data == "action:rebound":
         state = toggle_rebound()
         text = "📈 Rebound УВІМКНЕНО" if state else "📉 Rebound ВИМКНЕНО"
         await query.answer(text, show_alert=True)
 
-    # ---------- FORCE CHECK ----------
+    # ---- FORCE CHECK ----
     elif data == "action:check":
         await query.edit_message_text("🔄 Перевіряю всі ETF...")
         await check_prices(context)
-        await query.edit_message_text("✅ Готово", reply_markup=main_menu())
+        await query.edit_message_text(
+            "✅ Готово",
+            reply_markup=main_menu()
+        )
