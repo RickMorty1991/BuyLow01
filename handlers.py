@@ -1,37 +1,24 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import ContextTypes
-from db import add_etf, get_all_etfs
-from utils import get_main_menu_keyboard
+from db import set_threshold
+from callbacks import main_menu
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command - show main menu."""
-    welcome_text = (
-        "👋 Вітаю! Я BuyLow Bot.\n\n"
-        "Я допоможу відстежувати ціни на ETF та сповіщати, коли вони досягнуть цільового рівня.\n\n"
-        "Оберіть дію:"
-    )
-    
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=get_main_menu_keyboard()
-    )
-
-
-async def add(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /add command."""
-    if not context.args:
-        await update.message.reply_text(
-            "❗ Використання: /add AAPL\n\n"
-            "Або використайте кнопку ➕ Add ETF",
-            reply_markup=get_main_menu_keyboard()
-        )
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "set_threshold" not in context.user_data:
         return
 
-    ticker = context.args[0].upper()
-    add_etf(ticker)
+    ticker = context.user_data.pop("set_threshold")
+
+    try:
+        price = float(update.message.text)
+    except ValueError:
+        await update.message.reply_text("❌ Введіть число")
+        return
+
+    set_threshold(ticker, price)
 
     await update.message.reply_text(
-        f"✅ {ticker} додано",
-        reply_markup=get_main_menu_keyboard()
+        f"✅ Поріг для {ticker} встановлено: {price}",
+        reply_markup=main_menu()
     )
