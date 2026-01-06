@@ -9,7 +9,11 @@ async def check_prices(context):
         if not target:
             continue
 
-        price = yf.Ticker(ticker).fast_info["lastPrice"]
+        info = yf.Ticker(ticker).fast_info
+        price = info.get("lastPrice")
+
+        if not price:
+            continue
 
         trigger = False
 
@@ -23,7 +27,11 @@ async def check_prices(context):
         if trigger:
             await context.bot.send_message(
                 chat_id=context.bot_data["chat_id"],
-                text=f"🚨 {ticker}\nЦіна: {price}\nПоріг: {target}"
+                text=(
+                    f"🚨 {ticker}\n"
+                    f"Ціна: {price}\n"
+                    f"Поріг: {target}"
+                )
             )
 
         update_last_price(ticker, price)
